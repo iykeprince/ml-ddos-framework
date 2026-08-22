@@ -43,15 +43,15 @@ def clean_and_prepare_data(filepath):
     # 6. Export a clean subset for JASP statistical analysis
     jasp_df = X.copy()
     jasp_df['Label'] = y
-    os.makedirs('../data/processed', exist_ok=True)
-    jasp_df.to_csv('../data/processed/jasp_ready_data.csv', index=False)
-    print("Exported clean dataset for JASP analysis to: data/processed/jasp_ready_data.csv")
+    os.makedirs('./data/processed', exist_ok=True)
+    jasp_df.to_csv('./data/processed/jasp_ready_data.csv', index=False)
+    print("Exported clean dataset for JASP analysis to: ./data/processed/jasp_ready_data.csv")
     
     return X, y
 
 def train_and_evaluate():
     # Update this filename to match the CSV in your data/raw folder
-    csv_path = '../data/raw/cicddos2019_sample.csv' 
+    csv_path = './data/raw/cicddos2019_sample.csv' 
     
     X, y = clean_and_prepare_data(csv_path)
     print(f"\nFeatures mapped: {X.shape[1]} columns. Total usable rows: {X.shape[0]}")
@@ -81,9 +81,9 @@ def train_and_evaluate():
     print(classification_report(y_test, predictions))
     
     # 7. Serialize and Save the Model
-    os.makedirs('../models', exist_ok=True)
-    joblib.dump(rf_model, '../models/random_forest.pkl')
-    print("\nSuccess! Model serialized and saved to: ../models/random_forest.pkl")
+    os.makedirs('./models', exist_ok=True)
+    joblib.dump(rf_model, './models/random_forest.pkl')
+    print("\nSuccess! Model serialized and saved to: ./models/random_forest.pkl")
 
 if __name__ == "__main__":
     train_and_evaluate()
