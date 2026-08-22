@@ -29,5 +29,5 @@ def explore_dataset(csv_filepath):
 
 if __name__ == "__main__":
     # Update this path once you download the CSV
-    target_csv = "../data/raw/cicddos2019_sample.csv"
+    target_csv = "./data/raw/cicddos2019_sample.csv"
     explore_dataset(target_csv)
