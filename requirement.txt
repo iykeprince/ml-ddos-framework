@@ -1,5 +1,5 @@
-pandas==2.0.3
-scikit-learn==1.3.0
-joblib==1.3.2
-pyshark==0.6.0  # For live packet sniffing in the daemon
-scipy==1.11.1
+pandas
+scikit-learn
+joblib
+pyshark
+scipy

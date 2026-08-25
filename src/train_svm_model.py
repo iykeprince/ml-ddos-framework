@@ -36,7 +36,7 @@ def clean_and_prepare_data(filepath):
     return X, y
 
 def train_and_evaluate_svm():
-    csv_path = '../data/raw/cicddos2019_sample.csv' 
+    csv_path = './data/raw/cicddos2019_sample.csv' 
     
     X, y = clean_and_prepare_data(csv_path)
     
@@ -77,10 +77,10 @@ def train_and_evaluate_svm():
     print(classification_report(y_test, predictions))
     
     # Serialize and Save BOTH the Model and the Scaler
-    os.makedirs('../models', exist_ok=True)
-    joblib.dump(svm_model, '../models/svm_model.pkl')
-    joblib.dump(scaler, '../models/svm_scaler.pkl')
-    print("\nSuccess! Model and Scaler serialized to the ../models/ directory.")
+    os.makedirs('./models', exist_ok=True)
+    joblib.dump(svm_model, './models/svm_model.pkl')
+    joblib.dump(scaler, './models/svm_scaler.pkl')
+    print("\nSuccess! Model and Scaler serialized to the ./models/ directory.")
 
 if __name__ == "__main__":
     train_and_evaluate_svm()
