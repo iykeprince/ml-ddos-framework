@@ -19,12 +19,16 @@ if not hasattr(asyncio, 'SafeChildWatcher'):
         def is_active(self): return True
     asyncio.SafeChildWatcher = MockChildWatcher
 # ----------------------------------------------------
-
-import pyshark
+# --- FIX FOR PYTHON 3.12+ / 3.14 MISSING EVENT LOOP ---
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+# ----------------------------------------------------
 
 # --- CONFIGURATION ---
-INTERFACE = 'lo0'              # Local loopback for Mac localhost testing (use 'eth0' on Linux VM)
-TARGET_PORT = 8080             # Target HTTP port
+INTERFACE = 'enp0s8'              # Local loopback for Mac localhost testing (use 'eth0' on Linux VM)
+TARGET_PORT = 80             # Target HTTP port
 WINDOW_SIZE = 10               # Rolling window in seconds
 MODEL_CHOICE = 'random_forest' # Options: 'random_forest' or 'svm'
 
