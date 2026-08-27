@@ -5,6 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import asyncio
+import pyshark
 
 # --- PYTHON ASYNCIO / PYSHARK COMPATIBILITY PATCH ---
 if not hasattr(asyncio, 'set_child_watcher'):
