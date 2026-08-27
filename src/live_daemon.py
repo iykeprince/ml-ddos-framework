@@ -7,25 +7,25 @@ import pandas as pd
 import asyncio
 import pyshark
 
-# --- PYTHON ASYNCIO / PYSHARK COMPATIBILITY PATCH ---
-if not hasattr(asyncio, 'set_child_watcher'):
-    asyncio.set_child_watcher = lambda watcher: None
+# --- COMPLETE PYTHON 3.12+ / 3.14 ASYNCIO PATCH FOR PYSHARK ---
+class MockChildWatcher:
+    def attach_loop(self, loop): pass
+    def add_child_handler(self, pid, callback, *args): pass
+    def remove_child_handler(self, pid): pass
+    def close(self): pass
+    def is_active(self): return True
 
-if not hasattr(asyncio, 'SafeChildWatcher'):
-    class MockChildWatcher:
-        def attach_loop(self, loop): pass
-        def add_child_handler(self, pid, callback, *args): pass
-        def remove_child_handler(self, pid): pass
-        def close(self): pass
-        def is_active(self): return True
-    asyncio.SafeChildWatcher = MockChildWatcher
-# ----------------------------------------------------
-# --- FIX FOR PYTHON 3.12+ / 3.14 MISSING EVENT LOOP ---
+# Mock removed child watcher methods required by pyshark
+asyncio.SafeChildWatcher = MockChildWatcher
+asyncio.get_child_watcher = lambda: MockChildWatcher()
+asyncio.set_child_watcher = lambda watcher: None
+
+# Fix missing event loop in Python 3.14[cite: 2]
 try:
     asyncio.get_event_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
-# ----------------------------------------------------
+# --------------------------------------------------------------
 
 # --- CONFIGURATION ---
 INTERFACE = 'enp0s8'              # Local loopback for Mac localhost testing (use 'eth0' on Linux VM)
