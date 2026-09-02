@@ -1,6 +1,8 @@
 import time
 import os
 import subprocess
+import threading
+import logging
 import joblib
 import numpy as np
 import pandas as pd
@@ -15,12 +17,10 @@ class MockChildWatcher:
     def close(self): pass
     def is_active(self): return True
 
-# Mock removed child watcher methods required by pyshark
 asyncio.SafeChildWatcher = MockChildWatcher
 asyncio.get_child_watcher = lambda: MockChildWatcher()
 asyncio.set_child_watcher = lambda watcher: None
 
-# Fix missing event loop in Python 3.14[cite: 2]
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -28,18 +28,46 @@ except RuntimeError:
 # --------------------------------------------------------------
 
 # --- CONFIGURATION ---
-INTERFACE = 'enp0s8'              # Local loopback for Mac localhost testing (use 'eth0' on Linux VM)
-TARGET_PORT = 80             # Target HTTP port
-WINDOW_SIZE = 10               # Rolling window in seconds
-MODEL_CHOICE = 'random_forest' # Options: 'random_forest' or 'svm'
+INTERFACE = 'enp0s3'            # Victim Node interface on the isolated NAT Network
+TARGET_PORT = 80
+WINDOW_SIZE = 10                 # Rolling window in seconds
+MODEL_CHOICE = 'random_forest'   # 'random_forest' or 'svm'
 
-# Blocked IP cache to prevent duplicate iptables executions
+# Must exactly match FEATURE_COLUMNS in train_rf_model.py / train_svm_model.py,
+# same names, same order - sklearn validates this on predict().
+FEATURE_COLUMNS = [
+    'Flow Duration',
+    'Fwd IAT Mean',
+    'Bwd IAT Mean',
+    'Fwd IAT Std',
+    'Bwd IAT Std',
+    'SYN Flag Count',
+    'ACK Flag Count'
+]
+
+# --- MITIGATION TUNING ---
+STRIKES_REQUIRED = 2             # consecutive malicious windows required before a block
+CONFIDENCE_THRESHOLD = 0.85      # min malicious-class probability to count as a strike
+BLOCK_DURATION_SECONDS = 120     # blocks auto-expire; not permanent
+WHITELIST_IPS = {
+    # "10.10.10.1",   # e.g. gateway
+    # "10.10.10.20",  # e.g. JMeter client host
+}
+AUDIT_LOG_PATH = './mitigation_audit.log'
+
+logging.basicConfig(
+    filename=AUDIT_LOG_PATH,
+    level=logging.INFO,
+    format='%(asctime)s %(message)s'
+)
+
+IP_STRIKES = {}
 BLOCKED_IPS = set()
 
+
 def load_security_artifacts(model_type):
-    """Loads the serialized model and optional scaler based on user selection."""
     print(f"[+] Loading {model_type.upper()} security artifacts...")
-    
+
     if model_type == 'random_forest':
         model_path = './models/random_forest.pkl'
         if not os.path.exists(model_path):
@@ -55,131 +83,193 @@ def load_security_artifacts(model_type):
         scaler = joblib.load(scaler_path)
     else:
         raise ValueError("Invalid model choice! Choose 'random_forest' or 'svm'.")
-        
+
     print(f"[+] {model_type.upper()} model successfully loaded into memory.")
     return model, scaler
 
-def trigger_iptables_mitigation(ip_address):
-    """Executes system-level shell commands to append an iptables DROP rule for the attacker IP."""
-    if ip_address in BLOCKED_IPS:
-        return
-        
-    start_time = time.time()
-    cmd = f"sudo iptables -A INPUT -s {ip_address} -j DROP"
-    
+
+def get_malicious_confidence(model, feature_vector):
+    prediction = model.predict(feature_vector)[0]
+    if hasattr(model, "predict_proba"):
+        try:
+            proba = model.predict_proba(feature_vector)[0]
+            malicious_confidence = proba[1] if len(proba) > 1 else proba[0]
+            return prediction, malicious_confidence
+        except Exception:
+            pass
+    return prediction, (1.0 if prediction == 1 else 0.0)
+
+
+def unblock_ip(ip_address):
+    cmd = f"sudo iptables -D INPUT -s {ip_address} -j DROP"
     try:
         subprocess.run(cmd, shell=True, check=True)
-        mitigation_latency = (time.time() - start_time) * 1000  # in ms
-        
+        msg = f"[<---] Auto-unblocked {ip_address} after {BLOCK_DURATION_SECONDS}s quarantine."
+        print(f"\n{msg}\n")
+        logging.info(msg)
+    except subprocess.CalledProcessError as e:
+        print(f"[-] Failed to remove iptables rule for {ip_address}: {e}")
+        logging.info(f"FAILED auto-unblock for {ip_address}: {e}")
+    finally:
+        BLOCKED_IPS.discard(ip_address)
+        IP_STRIKES.pop(ip_address, None)
+
+
+def trigger_iptables_mitigation(ip_address, confidence, features):
+    if ip_address in BLOCKED_IPS:
+        return
+
+    start_time = time.time()
+    cmd = f"sudo iptables -A INPUT -s {ip_address} -j DROP"
+
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+        mitigation_latency = (time.time() - start_time) * 1000
+
         BLOCKED_IPS.add(ip_address)
-        print(f"\n[!!!] ALERT: ATTACK DETECTED FROM {ip_address}")
-        print(f"[--->] MITIGATION EXECUTION: Appended iptables DROP rule for {ip_address}")
+
+        print(f"\n[!!!] ALERT: ATTACK DETECTED FROM {ip_address} "
+              f"(confidence={confidence:.2f}, strikes={IP_STRIKES.get(ip_address, 0)})")
+        print(f"[--->] MITIGATION: temporary DROP rule for {ip_address} "
+              f"(auto-unblocks in {BLOCK_DURATION_SECONDS}s)")
         print(f"[--->] SUBPROCESS EXECUTION LATENCY: {mitigation_latency:.2f} ms\n")
+
+        logging.info(
+            f"BLOCK ip={ip_address} confidence={confidence:.3f} "
+            f"latency_ms={mitigation_latency:.2f} features={features}"
+        )
+
+        timer = threading.Timer(BLOCK_DURATION_SECONDS, unblock_ip, args=[ip_address])
+        timer.daemon = True
+        timer.start()
+
     except subprocess.CalledProcessError as e:
         print(f"[-] Failed to execute iptables command (Expected on macOS): {e}")
+        logging.info(f"FAILED block for {ip_address}: {e}")
+
 
 def process_live_window(packets, model, scaler, model_type):
-    """Extracts features from live packets captured in the 10-second window and performs inference."""
     if not packets:
         return
 
     flow_data = {}
-    
+
     for pkt in packets:
         try:
-            # Handle both IPv4 and IPv6 loopback addresses
             if hasattr(pkt, 'ip'):
                 src_ip = pkt.ip.src
             elif hasattr(pkt, 'ipv6'):
                 src_ip = pkt.ipv6.src
             else:
                 continue
-                
+
             pkt_time = float(pkt.sniff_timestamp)
-            has_psh = 1 if hasattr(pkt.tcp, 'flags_push') and pkt.tcp.flags_push == '1' else 0
-            
+            is_syn = hasattr(pkt.tcp, 'flags_syn') and pkt.tcp.flags_syn == '1'
+            is_ack = hasattr(pkt.tcp, 'flags_ack') and pkt.tcp.flags_ack == '1'
+
             if src_ip not in flow_data:
                 flow_data[src_ip] = {
                     'timestamps': [pkt_time],
-                    'psh_flags': [has_psh],
+                    'syn_count': 1 if is_syn else 0,
+                    'ack_count': 1 if is_ack else 0,
                     'fwd_pkts': 1,
-                    'bwd_pkts': 0 
                 }
             else:
                 flow_data[src_ip]['timestamps'].append(pkt_time)
-                flow_data[src_ip]['psh_flags'].append(has_psh)
+                flow_data[src_ip]['syn_count'] += 1 if is_syn else 0
+                flow_data[src_ip]['ack_count'] += 1 if is_ack else 0
                 flow_data[src_ip]['fwd_pkts'] += 1
         except AttributeError:
             continue
 
     for ip, data in flow_data.items():
-        if ip in BLOCKED_IPS:
+        if ip in WHITELIST_IPS or ip in BLOCKED_IPS:
             continue
-            
+
         timestamps = data['timestamps']
         if len(timestamps) < 2:
-            continue 
-            
-        flow_duration = (timestamps[-1] - timestamps[0]) * 1000  # in ms
-        iats = np.diff(timestamps) * 1000                         # in ms
-        fwd_iat_mean = np.mean(iats) if len(iats) > 0 else 0
-        bwd_iat_mean = 0 
-        fwd_psh_flags = sum(data['psh_flags'])
-        fwd_pkts_per_sec = data['fwd_pkts'] / WINDOW_SIZE if WINDOW_SIZE > 0 else 0
-        bwd_pkts_per_sec = 0
-        
+            continue
+
+        flow_duration = (timestamps[-1] - timestamps[0]) * 1000
+        iats = np.diff(timestamps) * 1000
+        fwd_iat_mean = float(np.mean(iats)) if len(iats) > 0 else 0.0
+        fwd_iat_std = float(np.std(iats)) if len(iats) > 0 else 0.0
+
+        # NOTE / KNOWN LIMITATION: this capture only observes packets sourced
+        # from `ip` (the client), so true backward (server->client) flow
+        # timing can't be derived from this single grouping without also
+        # tracking response packets by destination IP. Bwd IAT is therefore
+        # held at 0 in real-time inference. Document this explicitly in your
+        # Threats to Validity / Limitations section (Section 5.3) - it's a
+        # genuine gap between the offline feature set and what the live
+        # daemon can compute without a full bidirectional flow tracker.
+        bwd_iat_mean = 0.0
+        bwd_iat_std = 0.0
+
         feature_vector = pd.DataFrame([{
             'Flow Duration': flow_duration,
             'Fwd IAT Mean': fwd_iat_mean,
             'Bwd IAT Mean': bwd_iat_mean,
-            'Fwd PSH Flags': fwd_psh_flags,
-            'Fwd Packets/s': fwd_pkts_per_sec,
-            'Bwd Packets/s': bwd_pkts_per_sec
-        }])
-        
+            'Fwd IAT Std': fwd_iat_std,
+            'Bwd IAT Std': bwd_iat_std,
+            'SYN Flag Count': data['syn_count'],
+            'ACK Flag Count': data['ack_count']
+        }])[FEATURE_COLUMNS]  # enforce exact training column order
+
         start_inference = time.time()
-        
+
         if model_type == 'svm' and scaler is not None:
-            feature_vector_scaled = scaler.transform(feature_vector)
-            prediction = model.predict(feature_vector_scaled)[0]
+            fv = scaler.transform(feature_vector)
+            prediction, confidence = get_malicious_confidence(model, fv)
         else:
-            prediction = model.predict(feature_vector)[0]
-            
-        inference_latency = (time.time() - start_inference) * 1000  # in ms
-        
-        if prediction == 1:
-            print(f"\n[!] Threat Flagged: IP {ip} | Inference Latency: {inference_latency:.2f} ms")
-            trigger_iptables_mitigation(ip)
+            prediction, confidence = get_malicious_confidence(model, feature_vector)
+
+        inference_latency = (time.time() - start_inference) * 1000
+
+        if prediction == 1 and confidence >= CONFIDENCE_THRESHOLD:
+            IP_STRIKES[ip] = IP_STRIKES.get(ip, 0) + 1
+            print(f"\n[!] Suspicious window: IP {ip} | confidence={confidence:.2f} "
+                  f"| strikes={IP_STRIKES[ip]}/{STRIKES_REQUIRED} "
+                  f"| inference latency={inference_latency:.2f} ms")
+
+            if IP_STRIKES[ip] >= STRIKES_REQUIRED:
+                trigger_iptables_mitigation(ip, confidence, feature_vector.iloc[0].to_dict())
+        else:
+            if ip in IP_STRIKES:
+                IP_STRIKES[ip] = 0
+
 
 def start_live_daemon(interface, target_port, window_size, model_type):
-    """Main loop: Sniffs traffic continuously in rolling windows."""
     model, scaler = load_security_artifacts(model_type)
-    
+
     print(f"\n[+] Starting Live Network Security Daemon on interface '{interface}' (Port {target_port})...")
     print(f"[+] Monitoring in rolling {window_size}-second windows using model: {model_type.upper()}")
+    print(f"[+] Mitigation policy: {STRIKES_REQUIRED} consecutive malicious windows "
+          f"@ confidence>={CONFIDENCE_THRESHOLD}, auto-unblock after {BLOCK_DURATION_SECONDS}s")
     print("[+] Press Ctrl+C to stop.\n")
-    
+
     try:
         while True:
             capture = pyshark.LiveCapture(interface=interface, bpf_filter=f'tcp port {target_port}')
             packets_in_window = []
             window_start = time.time()
-            
+
             for pkt in capture.sniff_continuously():
                 packets_in_window.append(pkt)
                 if time.time() - window_start >= window_size:
                     break
-                    
+
             print(f"[*] Window closed. Analyzed {len(packets_in_window)} packets across {window_size}s.")
             process_live_window(packets_in_window, model, scaler, model_type)
             capture.close()
-            
+
     except KeyboardInterrupt:
         print("\n[-] Daemon stopped by user. Cleaning up...")
+
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
         print("[!] WARNING: This script requires root/sudo permissions!")
-        print("[!] Run with: sudo ./venv/bin/python src/live_daemon.py")
+        print("[!] Run with: sudo ./venv/bin/python live_daemon.py")
     else:
         start_live_daemon(INTERFACE, TARGET_PORT, WINDOW_SIZE, MODEL_CHOICE)
