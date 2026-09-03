@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     classification_report, accuracy_score, confusion_matrix,
@@ -38,8 +38,22 @@ def load_and_clean_data(csv_path):
             f"Columns present: {list(df.columns)}"
         )
 
+    # Force every feature + Label column to numeric. This catches stray
+    # duplicated header rows (e.g. from a shell `cat file1.csv file2.csv`
+    # concatenation instead of pandas.concat) or any other non-numeric
+    # garbage row - anything that can't be coerced becomes NaN and is
+    # dropped below, instead of crashing GridSearchCV mid-run.
+    before_rows = len(df)
+    for col in FEATURE_COLUMNS + ['Label']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(subset=FEATURE_COLUMNS + ['Label'], inplace=True)
+
+    dropped = before_rows - len(df)
+    if dropped > 0:
+        print(f"[!] Dropped {dropped} row(s) with non-numeric or missing values "
+              f"(check for a duplicated/embedded header row if this number is unexpectedly high).")
 
     X = df[FEATURE_COLUMNS]
     y = df['Label'].astype(int)  # already 0=benign, 1=malicious from label_flows.py
@@ -47,7 +61,7 @@ def load_and_clean_data(csv_path):
 
 
 def train_and_evaluate():
-    # Point this at your actual generated dataset
+    # Point this at your actual generated dataset, not the public CICDDoS2019 sample
     csv_path = './data/processed/cleaned_narrow_flows.csv'
 
     X, y = load_and_clean_data(csv_path)
@@ -57,31 +71,31 @@ def train_and_evaluate():
         X, y, test_size=0.30, random_state=42, stratify=y
     )
 
-    # Table 3.1 search grid
-    param_grid = {
-        'n_estimators': [50, 100, 200, 300],
-        'max_depth': [10, 20, 30, None],
-        'min_samples_split': [2, 5, 10],
-        'max_features': ['sqrt', 'log2']
-    }
-
-    cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-
-    print("Running GridSearchCV (10-fold, scoring=F1)... this can take a while.")
-    grid = GridSearchCV(
-        RandomForestClassifier(random_state=42, n_jobs=-1, criterion='gini'),
-        param_grid,
-        cv=cv,
-        scoring='f1',
-        n_jobs=-1,
-        verbose=1
+    # Regularized, fixed hyperparameters (no GridSearchCV) - deliberately
+    # conservative given the small dataset (7,624 rows, 386-sample minority
+    # class): shallow trees, small forest, high leaf/split minimums, and
+    # class_weight='balanced' to counter the ~19:1 malicious:benign ratio.
+    print("Training Random Forest with fixed, regularized hyperparameters...")
+    rf_model = RandomForestClassifier(
+        n_estimators=50,
+        max_depth=5,
+        min_samples_split=10,
+        min_samples_leaf=8,
+        max_features='sqrt',
+        criterion='gini',
+        class_weight='balanced',
+        random_state=42,
+        n_jobs=-1
     )
-    grid.fit(X_train, y_train)
+    rf_model.fit(X_train, y_train)
 
-    print(f"\nBest params: {grid.best_params_}")
-    print(f"Best mean CV F1 score: {grid.best_score_:.4f}")
-
-    rf_model = grid.best_estimator_
+    # 10-fold stratified CV score on the training set, for reference only
+    # (no hyperparameter search happening here - this just reports how
+    # stable this fixed configuration is across folds).
+    cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(rf_model, X_train, y_train, cv=cv, scoring='f1', n_jobs=-1)
+    print(f"10-fold CV F1 scores: {cv_scores}")
+    print(f"Mean CV F1: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
 
     predictions = rf_model.predict(X_test)
     probs = rf_model.predict_proba(X_test)[:, 1]
