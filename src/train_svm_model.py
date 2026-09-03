@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
@@ -67,32 +67,11 @@ def train_and_evaluate_svm():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Table 3.2 search grid
-    param_grid = {
-        'kernel': ['linear', 'rbf'],
-        'C': [0.1, 1, 10, 100],
-        'gamma': ['scale', 'auto', 0.01]
-    }
-
-    cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-
-    print("Running GridSearchCV (10-fold, scoring=F1)... this WILL take a while for SVM.")
-    grid = GridSearchCV(
-        # probability=True is required so predict_proba works later for AUC
-        # and for the live daemon's confidence-threshold mitigation logic.
-        SVC(random_state=42, probability=True),
-        param_grid,
-        cv=cv,
-        scoring='f1',
-        n_jobs=-1,
-        verbose=1
-    )
-    grid.fit(X_train_scaled, y_train)
-
-    print(f"\nBest params: {grid.best_params_}")
-    print(f"Best mean CV F1 score: {grid.best_score_:.4f}")
-
-    svm_model = grid.best_estimator_
+    print("Training SVM (kernel=rbf)...")
+    # probability=True is required so predict_proba works later for AUC
+    # and for the live daemon's confidence-threshold mitigation logic.
+    svm_model = SVC(kernel='rbf', C=1, gamma='scale', random_state=42, probability=True)
+    svm_model.fit(X_train_scaled, y_train)
 
     predictions = svm_model.predict(X_test_scaled)
     probs = svm_model.predict_proba(X_test_scaled)[:, 1]
