@@ -2,6 +2,25 @@ import pyshark
 import numpy as np
 import pandas as pd
 import sys
+import asyncio
+
+# --- COMPLETE PYTHON 3.12+ / 3.14 ASYNCIO PATCH FOR PYSHARK ---
+class MockChildWatcher:
+    def attach_loop(self, loop): pass
+    def add_child_handler(self, pid, callback, *args): pass
+    def remove_child_handler(self, pid): pass
+    def close(self): pass
+    def is_active(self): return True
+
+asyncio.SafeChildWatcher = MockChildWatcher
+asyncio.get_child_watcher = lambda: MockChildWatcher()
+asyncio.set_child_watcher = lambda watcher: None
+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+# --------------------------------------------------------------
 
 """
 Reprocesses an existing PCAP file into WINDOWED flow features, using the
