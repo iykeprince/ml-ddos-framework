@@ -62,7 +62,7 @@ def load_and_clean_data(csv_path):
 
 def train_and_evaluate():
     # Point this at your actual generated dataset, not the public CICDDoS2019 sample
-    csv_path = './data/processed/cleaned_narrow_flows.csv'
+    csv_path = './data/processed/windowed_flows_labeled.csv'
 
     X, y = load_and_clean_data(csv_path)
     print(f"Rows: {X.shape[0]} | Benign: {(y == 0).sum()} | Malicious: {(y == 1).sum()}")

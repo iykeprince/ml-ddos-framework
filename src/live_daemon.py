@@ -49,7 +49,13 @@ FEATURE_COLUMNS = [
 STRIKES_REQUIRED = 2             # consecutive malicious windows required before a block
 CONFIDENCE_THRESHOLD = 0.85      # min malicious-class probability to count as a strike
 BLOCK_DURATION_SECONDS = 120     # blocks auto-expire; not permanent
+# IPs that should never be auto-blocked regardless of classification -
+# always include this host's own IP, since the BPF filter captures both
+# inbound client traffic AND this server's own outbound responses on
+# port 80. Without this, the daemon can misclassify its own response
+# traffic as an attacking flow and block itself.
 WHITELIST_IPS = {
+    "10.10.10.10",  # Victim Node's own IP - NEVER remove this
     # "10.10.10.1",   # e.g. gateway
     # "10.10.10.20",  # e.g. JMeter client host
 }
@@ -225,6 +231,12 @@ def process_live_window(packets, model, scaler, model_type):
             prediction, confidence = get_malicious_confidence(model, feature_vector)
 
         inference_latency = (time.time() - start_inference) * 1000
+
+        # --- TEMPORARY DEBUG: always print confidence + features, even
+        # below threshold, to diagnose why live detection isn't firing.
+        # Remove this block once detection is confirmed working.
+        print(f"[DEBUG] IP={ip} pred={prediction} confidence={confidence:.4f} "
+              f"features={feature_vector.iloc[0].to_dict()}")
 
         if prediction == 1 and confidence >= CONFIDENCE_THRESHOLD:
             IP_STRIKES[ip] = IP_STRIKES.get(ip, 0) + 1
